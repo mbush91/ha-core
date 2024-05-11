@@ -1,0 +1,8 @@
+{
+  "domain": "bluetooth_logger",
+  "name": "Bluetooth Logger",
+  "documentation": "https://example.com",
+  "dependencies": ["bluetooth_adapters"],
+  "codeowners": ["@mbush91"],
+  "requirements": []
+}
