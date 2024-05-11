@@ -4,5 +4,6 @@
   "documentation": "https://example.com",
   "dependencies": ["bluetooth_adapters"],
   "codeowners": ["@mbush91"],
-  "requirements": []
+  "requirements": [],
+  "version": "0.1.0"
 }
