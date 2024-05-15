@@ -1025,6 +1025,8 @@ build.json @home-assistant/supervisor
 /homeassistant/components/onkyo/ @arturpragacz
 /homeassistant/components/onvif/ @hunterjm
 /tests/components/onvif/ @hunterjm
+/homeassistant/components/open_ble_sensors/ @mbush91
+/tests/components/open_ble_sensors/ @mbush91
 /homeassistant/components/open_meteo/ @frenck
 /tests/components/open_meteo/ @frenck
 /homeassistant/components/openai_conversation/ @balloob
