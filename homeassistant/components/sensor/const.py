@@ -220,6 +220,12 @@ class SensorDeviceClass(StrEnum):
     Unit of measurement: `lx`
     """
 
+    IMPEDANCE = "Impedance"
+    """Impedance.
+
+    Unit of measurement: `Ohms`
+    """
+
     IRRADIANCE = "irradiance"
     """Irradiance.
 
