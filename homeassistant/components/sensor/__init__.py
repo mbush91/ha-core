@@ -50,11 +50,7 @@ from homeassistant.const import (  # noqa: F401
 )
 from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.config_validation import (
-    PLATFORM_SCHEMA,
-    PLATFORM_SCHEMA_BASE,
-)
+from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers.deprecation import (
     all_with_deprecated_constants,
     check_if_deprecated_constant,
@@ -67,8 +63,8 @@ from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.helpers.typing import UNDEFINED, ConfigType, StateType, UndefinedType
 from homeassistant.util import dt as dt_util
 from homeassistant.util.enum import try_parse_enum
+from homeassistant.util.hass_dict import HassKey
 
-from . import group as group_pre_import  # noqa: F401
 from .const import (  # noqa: F401
     _DEPRECATED_STATE_CLASS_MEASUREMENT,
     _DEPRECATED_STATE_CLASS_TOTAL,
@@ -93,8 +89,10 @@ from .websocket_api import async_setup as async_setup_ws_api
 
 _LOGGER: Final = logging.getLogger(__name__)
 
+DOMAIN_DATA: HassKey[EntityComponent[SensorEntity]] = HassKey(DOMAIN)
 ENTITY_ID_FORMAT: Final = DOMAIN + ".{}"
-
+PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA
+PLATFORM_SCHEMA_BASE = cv.PLATFORM_SCHEMA_BASE
 SCAN_INTERVAL: Final = timedelta(seconds=30)
 
 __all__ = [
@@ -119,7 +117,7 @@ __all__ = [
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Track states and offer events for sensors."""
-    component = hass.data[DOMAIN] = EntityComponent[SensorEntity](
+    component = hass.data[DOMAIN_DATA] = EntityComponent[SensorEntity](
         _LOGGER, DOMAIN, hass, SCAN_INTERVAL
     )
 
@@ -130,14 +128,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a config entry."""
-    component: EntityComponent[SensorEntity] = hass.data[DOMAIN]
-    return await component.async_setup_entry(entry)
+    return await hass.data[DOMAIN_DATA].async_setup_entry(entry)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    component: EntityComponent[SensorEntity] = hass.data[DOMAIN]
-    return await component.async_unload_entry(entry)
+    return await hass.data[DOMAIN_DATA].async_unload_entry(entry)
 
 
 class SensorEntityDescription(EntityDescription, frozen_or_thawed=True):
@@ -384,15 +380,9 @@ class SensorEntity(Entity, cached_properties=CACHED_PROPERTIES_WITH_ATTR_):
         ):
             if not self._invalid_suggested_unit_of_measurement_reported:
                 self._invalid_suggested_unit_of_measurement_reported = True
-                report_issue = self._suggest_report_issue()
-                # This should raise in Home Assistant Core 2024.5
-                _LOGGER.warning(
-                    (
-                        "%s sets an invalid suggested_unit_of_measurement. Please %s. "
-                        "This warning will become an error in Home Assistant Core 2024.5"
-                    ),
-                    type(self),
-                    report_issue,
+                raise ValueError(
+                    f"Entity {type(self)} suggest an incorrect "
+                    f"unit of measurement: {suggested_unit_of_measurement}."
                 )
             return False
 
@@ -404,9 +394,18 @@ class SensorEntity(Entity, cached_properties=CACHED_PROPERTIES_WITH_ATTR_):
         suggested_unit_of_measurement = self.suggested_unit_of_measurement
 
         if suggested_unit_of_measurement is None:
-            # Fallback to suggested by the unit conversion rules
+            # Fallback to unit suggested by the unit conversion rules from device class
             suggested_unit_of_measurement = self.hass.config.units.get_converted_unit(
                 self.device_class, self.native_unit_of_measurement
+            )
+
+        if suggested_unit_of_measurement is None and (
+            unit_converter := UNIT_CONVERTERS.get(self.device_class)
+        ):
+            # If the device class is not known by the unit system but has a unit converter,
+            # fall back to the unit suggested by the unit converter's unit class.
+            suggested_unit_of_measurement = self.hass.config.units.get_converted_unit(
+                unit_converter.UNIT_CLASS, self.native_unit_of_measurement
             )
 
         if suggested_unit_of_measurement is None:
@@ -787,10 +786,10 @@ class SensorEntity(Entity, cached_properties=CACHED_PROPERTIES_WITH_ATTR_):
             display_precision = max(0, display_precision + ratio_log)
 
         sensor_options: Mapping[str, Any] = self.registry_entry.options.get(DOMAIN, {})
-        if (
-            "suggested_display_precision" in sensor_options
-            and sensor_options["suggested_display_precision"] == display_precision
-        ):
+        if "suggested_display_precision" not in sensor_options:
+            if display_precision is None:
+                return
+        elif sensor_options["suggested_display_precision"] == display_precision:
             return
 
         registry = er.async_get(self.hass)

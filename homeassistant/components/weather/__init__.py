@@ -31,13 +31,9 @@ from homeassistant.core import (
     callback,
 )
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.config_validation import (  # noqa: F401
-    PLATFORM_SCHEMA,
-    PLATFORM_SCHEMA_BASE,
-)
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity import ABCCachedProperties, Entity, EntityDescription
 from homeassistant.helpers.entity_component import EntityComponent
-import homeassistant.helpers.issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -48,8 +44,7 @@ from homeassistant.util.dt import utcnow
 from homeassistant.util.json import JsonValueType
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
-from . import group as group_pre_import  # noqa: F401
-from .const import (
+from .const import (  # noqa: F401
     ATTR_WEATHER_APPARENT_TEMPERATURE,
     ATTR_WEATHER_CLOUD_COVERAGE,
     ATTR_WEATHER_DEW_POINT,
@@ -68,6 +63,8 @@ from .const import (
     ATTR_WEATHER_WIND_SPEED,
     ATTR_WEATHER_WIND_SPEED_UNIT,
     DOMAIN,
+    DOMAIN_DATA,
+    INTENT_GET_WEATHER,
     UNIT_CONVERSIONS,
     VALID_UNITS,
     WeatherEntityFeature,
@@ -75,6 +72,11 @@ from .const import (
 from .websocket_api import async_setup as async_setup_ws_api
 
 _LOGGER = logging.getLogger(__name__)
+
+ENTITY_ID_FORMAT = DOMAIN + ".{}"
+PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA
+PLATFORM_SCHEMA_BASE = cv.PLATFORM_SCHEMA_BASE
+SCAN_INTERVAL = timedelta(seconds=30)
 
 ATTR_CONDITION_CLASS = "condition_class"
 ATTR_CONDITION_CLEAR_NIGHT = "clear-night"
@@ -117,14 +119,8 @@ ATTR_FORECAST_DEW_POINT: Final = "dew_point"
 ATTR_FORECAST_CLOUD_COVERAGE: Final = "cloud_coverage"
 ATTR_FORECAST_UV_INDEX: Final = "uv_index"
 
-ENTITY_ID_FORMAT = DOMAIN + ".{}"
-
-SCAN_INTERVAL = timedelta(seconds=30)
-
 ROUNDING_PRECISION = 2
 
-LEGACY_SERVICE_GET_FORECAST: Final = "get_forecast"
-"""Deprecated: please use SERVICE_GET_FORECASTS."""
 SERVICE_GET_FORECASTS: Final = "get_forecasts"
 
 _ObservationUpdateCoordinatorT = TypeVar(
@@ -201,19 +197,8 @@ class Forecast(TypedDict, total=False):
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the weather component."""
-    component = hass.data[DOMAIN] = EntityComponent[WeatherEntity](
+    component = hass.data[DOMAIN_DATA] = EntityComponent[WeatherEntity](
         _LOGGER, DOMAIN, hass, SCAN_INTERVAL
-    )
-    component.async_register_legacy_entity_service(
-        LEGACY_SERVICE_GET_FORECAST,
-        {vol.Required("type"): vol.In(("daily", "hourly", "twice_daily"))},
-        async_get_forecast_service,
-        required_features=[
-            WeatherEntityFeature.FORECAST_DAILY,
-            WeatherEntityFeature.FORECAST_HOURLY,
-            WeatherEntityFeature.FORECAST_TWICE_DAILY,
-        ],
-        supports_response=SupportsResponse.ONLY,
     )
     component.async_register_entity_service(
         SERVICE_GET_FORECASTS,
@@ -233,14 +218,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a config entry."""
-    component: EntityComponent[WeatherEntity] = hass.data[DOMAIN]
-    return await component.async_setup_entry(entry)
+    return await hass.data[DOMAIN_DATA].async_setup_entry(entry)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    component: EntityComponent[WeatherEntity] = hass.data[DOMAIN]
-    return await component.async_unload_entry(entry)
+    return await hass.data[DOMAIN_DATA].async_unload_entry(entry)
 
 
 class WeatherEntityDescription(EntityDescription, frozen_or_thawed=True):
@@ -939,7 +922,6 @@ class WeatherEntity(Entity, PostInit, cached_properties=CACHED_PROPERTIES_WITH_A
         forecast_type: Literal["daily", "hourly", "twice_daily"],
     ) -> None:
         """Start subscription to forecast_type."""
-        return None
 
     @callback
     def _async_subscription_ended(
@@ -947,7 +929,6 @@ class WeatherEntity(Entity, PostInit, cached_properties=CACHED_PROPERTIES_WITH_A
         forecast_type: Literal["daily", "hourly", "twice_daily"],
     ) -> None:
         """End subscription to forecast_type."""
-        return None
 
     @final
     @callback
@@ -1010,32 +991,6 @@ def raise_unsupported_forecast(entity_id: str, forecast_type: str) -> None:
     raise HomeAssistantError(
         f"Weather entity '{entity_id}' does not support '{forecast_type}' forecast"
     )
-
-
-async def async_get_forecast_service(
-    weather: WeatherEntity, service_call: ServiceCall
-) -> ServiceResponse:
-    """Get weather forecast.
-
-    Deprecated: please use async_get_forecasts_service.
-    """
-    _LOGGER.warning(
-        "Detected use of service 'weather.get_forecast'. "
-        "This is deprecated and will stop working in Home Assistant 2024.6. "
-        "Use 'weather.get_forecasts' instead which supports multiple entities",
-    )
-    ir.async_create_issue(
-        weather.hass,
-        DOMAIN,
-        "deprecated_service_weather_get_forecast",
-        breaks_in_ha_version="2024.6.0",
-        is_fixable=True,
-        is_persistent=False,
-        issue_domain=weather.platform.platform_name,
-        severity=ir.IssueSeverity.WARNING,
-        translation_key="deprecated_service_weather_get_forecast",
-    )
-    return await async_get_forecasts_service(weather, service_call)
 
 
 async def async_get_forecasts_service(

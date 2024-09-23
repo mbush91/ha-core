@@ -1,20 +1,15 @@
 """Test repairs for KNX integration."""
 
-from http import HTTPStatus
-
 from homeassistant.components.knx.const import DOMAIN, KNX_ADDRESS
 from homeassistant.components.knx.schema import NotifySchema
 from homeassistant.components.notify import DOMAIN as NOTIFY_DOMAIN
-from homeassistant.components.repairs.websocket_api import (
-    RepairsFlowIndexView,
-    RepairsFlowResourceView,
-)
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
 import homeassistant.helpers.issue_registry as ir
 
 from .conftest import KNXTestKit
 
+from tests.components.repairs import process_repair_fix_flow, start_repair_fix_flow
 from tests.typing import ClientSessionGenerator
 
 
@@ -54,31 +49,24 @@ async def test_knx_notify_service_issue(
     # Assert the issue is present
     assert len(issue_registry.issues) == 1
     assert issue_registry.async_get_issue(
-        domain=DOMAIN,
-        issue_id="migrate_notify",
+        domain="notify",
+        issue_id=f"migrate_notify_{DOMAIN}_notify",
     )
 
     # Test confirm step in repair flow
-    resp = await http_client.post(
-        RepairsFlowIndexView.url,
-        json={"handler": DOMAIN, "issue_id": "migrate_notify"},
+    data = await start_repair_fix_flow(
+        http_client, "notify", f"migrate_notify_{DOMAIN}_notify"
     )
-    assert resp.status == HTTPStatus.OK
-    data = await resp.json()
 
     flow_id = data["flow_id"]
     assert data["step_id"] == "confirm"
 
-    resp = await http_client.post(
-        RepairsFlowResourceView.url.format(flow_id=flow_id),
-    )
-    assert resp.status == HTTPStatus.OK
-    data = await resp.json()
+    data = await process_repair_fix_flow(http_client, flow_id)
     assert data["type"] == "create_entry"
 
     # Assert the issue is no longer present
     assert not issue_registry.async_get_issue(
-        domain=DOMAIN,
-        issue_id="migrate_notify",
+        domain="notify",
+        issue_id=f"migrate_notify_{DOMAIN}_notify",
     )
     assert len(issue_registry.issues) == 0

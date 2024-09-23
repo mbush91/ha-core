@@ -5,8 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 import uuid
 
-from bring_api.exceptions import BringRequestException
-from bring_api.types import BringItem, BringItemOperation, BringNotificationType
+from bring_api import (
+    BringItem,
+    BringItemOperation,
+    BringNotificationType,
+    BringRequestException,
+)
 import voluptuous as vol
 
 from homeassistant.components.todo import (
@@ -18,9 +22,7 @@ from homeassistant.components.todo import (
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv, entity_platform
-from homeassistant.helpers.config_validation import make_entity_service_schema
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import BringConfigEntry
 from .const import (
@@ -29,7 +31,8 @@ from .const import (
     DOMAIN,
     SERVICE_PUSH_NOTIFICATION,
 )
-from .coordinator import BringData, BringDataUpdateCoordinator
+from .coordinator import BringData
+from .entity import BringBaseEntity
 
 
 async def async_setup_entry(
@@ -40,16 +43,10 @@ async def async_setup_entry(
     """Set up the sensor from a config entry created in the integrations UI."""
     coordinator = config_entry.runtime_data
 
-    unique_id = config_entry.unique_id
-
-    if TYPE_CHECKING:
-        assert unique_id
-
     async_add_entities(
         BringTodoListEntity(
             coordinator,
             bring_list=bring_list,
-            unique_id=unique_id,
         )
         for bring_list in coordinator.data.values()
     )
@@ -58,43 +55,27 @@ async def async_setup_entry(
 
     platform.async_register_entity_service(
         SERVICE_PUSH_NOTIFICATION,
-        make_entity_service_schema(
-            {
-                vol.Required(ATTR_NOTIFICATION_TYPE): vol.All(
-                    vol.Upper, cv.enum(BringNotificationType)
-                ),
-                vol.Optional(ATTR_ITEM_NAME): cv.string,
-            }
-        ),
+        {
+            vol.Required(ATTR_NOTIFICATION_TYPE): vol.All(
+                vol.Upper, cv.enum(BringNotificationType)
+            ),
+            vol.Optional(ATTR_ITEM_NAME): cv.string,
+        },
         "async_send_message",
     )
 
 
-class BringTodoListEntity(
-    CoordinatorEntity[BringDataUpdateCoordinator], TodoListEntity
-):
+class BringTodoListEntity(BringBaseEntity, TodoListEntity):
     """A To-do List representation of the Bring! Shopping List."""
 
     _attr_translation_key = "shopping_list"
-    _attr_has_entity_name = True
+    _attr_name = None
     _attr_supported_features = (
         TodoListEntityFeature.CREATE_TODO_ITEM
         | TodoListEntityFeature.UPDATE_TODO_ITEM
         | TodoListEntityFeature.DELETE_TODO_ITEM
         | TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
     )
-
-    def __init__(
-        self,
-        coordinator: BringDataUpdateCoordinator,
-        bring_list: BringData,
-        unique_id: str,
-    ) -> None:
-        """Initialize BringTodoListEntity."""
-        super().__init__(coordinator)
-        self._list_uuid = bring_list["listUuid"]
-        self._attr_name = bring_list["name"]
-        self._attr_unique_id = f"{unique_id}_{self._list_uuid}"
 
     @property
     def todo_items(self) -> list[TodoItem]:
@@ -107,7 +88,7 @@ class BringTodoListEntity(
                     description=item["specification"] or "",
                     status=TodoItemStatus.NEEDS_ACTION,
                 )
-                for item in self.bring_list["purchase_items"]
+                for item in self.bring_list["purchase"]
             ),
             *(
                 TodoItem(
@@ -116,7 +97,7 @@ class BringTodoListEntity(
                     description=item["specification"] or "",
                     status=TodoItemStatus.COMPLETED,
                 )
-                for item in self.bring_list["recently_items"]
+                for item in self.bring_list["recently"]
             ),
         ]
 
@@ -130,7 +111,7 @@ class BringTodoListEntity(
         try:
             await self.coordinator.bring.save_item(
                 self.bring_list["listUuid"],
-                item.summary,
+                item.summary or "",
                 item.description or "",
                 str(uuid.uuid4()),
             )
@@ -165,12 +146,12 @@ class BringTodoListEntity(
         bring_list = self.bring_list
 
         bring_purchase_item = next(
-            (i for i in bring_list["purchase_items"] if i["uuid"] == item.uid),
+            (i for i in bring_list["purchase"] if i["uuid"] == item.uid),
             None,
         )
 
         bring_recently_item = next(
-            (i for i in bring_list["recently_items"] if i["uuid"] == item.uid),
+            (i for i in bring_list["recently"] if i["uuid"] == item.uid),
             None,
         )
 
@@ -185,8 +166,8 @@ class BringTodoListEntity(
                 await self.coordinator.bring.batch_update_list(
                     bring_list["listUuid"],
                     BringItem(
-                        itemId=item.summary,
-                        spec=item.description,
+                        itemId=item.summary or "",
+                        spec=item.description or "",
                         uuid=item.uid,
                     ),
                     BringItemOperation.ADD
@@ -206,13 +187,13 @@ class BringTodoListEntity(
                     [
                         BringItem(
                             itemId=current_item["itemId"],
-                            spec=item.description,
+                            spec=item.description or "",
                             uuid=item.uid,
                             operation=BringItemOperation.REMOVE,
                         ),
                         BringItem(
-                            itemId=item.summary,
-                            spec=item.description,
+                            itemId=item.summary or "",
+                            spec=item.description or "",
                             uuid=str(uuid.uuid4()),
                             operation=BringItemOperation.ADD
                             if item.status == TodoItemStatus.NEEDS_ACTION

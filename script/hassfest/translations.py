@@ -41,6 +41,7 @@ ALLOW_NAME_TRANSLATION = {
     "local_todo",
     "nmap_tracker",
     "rpi_power",
+    "swiss_public_transport",
     "waze_travel_time",
     "zodiac",
 }
@@ -130,11 +131,13 @@ def translation_value_validator(value: Any) -> str:
     - prevents strings with single quoted placeholders
     - prevents combined translations
     """
-    value = cv.string_with_no_html(value)
-    value = string_no_single_quoted_placeholders(value)
-    if RE_COMBINED_REFERENCE.search(value):
+    string_value = cv.string_with_no_html(value)
+    string_value = string_no_single_quoted_placeholders(string_value)
+    if RE_COMBINED_REFERENCE.search(string_value):
         raise vol.Invalid("the string should not contain combined translations")
-    return str(value)
+    if string_value != string_value.strip():
+        raise vol.Invalid("the string should not contain leading or trailing spaces")
+    return string_value
 
 
 def string_no_single_quoted_placeholders(value: str) -> str:
@@ -166,6 +169,13 @@ def gen_data_entry_schema(
                 vol.Optional("data_description"): {str: translation_value_validator},
                 vol.Optional("menu_options"): {str: translation_value_validator},
                 vol.Optional("submit"): translation_value_validator,
+                vol.Optional("sections"): {
+                    str: {
+                        vol.Optional("data"): {str: translation_value_validator},
+                        vol.Optional("description"): translation_value_validator,
+                        vol.Optional("name"): translation_value_validator,
+                    },
+                },
             }
         },
         vol.Optional("error"): {str: translation_value_validator},
@@ -250,6 +260,14 @@ def gen_issues_schema(config: Config, integration: Integration) -> dict[str, Any
     }
 
 
+_EXCEPTIONS_SCHEMA = {
+    vol.Optional("exceptions"): cv.schema_with_slug_keys(
+        {vol.Optional("message"): translation_value_validator},
+        slug_validator=cv.slug,
+    ),
+}
+
+
 def gen_strings_schema(config: Config, integration: Integration) -> vol.Schema:
     """Generate a strings schema."""
     return vol.Schema(
@@ -284,6 +302,10 @@ def gen_strings_schema(config: Config, integration: Integration) -> vol.Schema:
                 vol.Optional("condition_type"): {str: translation_value_validator},
                 vol.Optional("trigger_type"): {str: translation_value_validator},
                 vol.Optional("trigger_subtype"): {str: translation_value_validator},
+                vol.Optional("extra_fields"): {str: translation_value_validator},
+                vol.Optional("extra_fields_descriptions"): {
+                    str: translation_value_validator
+                },
             },
             vol.Optional("system_health"): {
                 vol.Optional("info"): cv.schema_with_slug_keys(
@@ -351,10 +373,7 @@ def gen_strings_schema(config: Config, integration: Integration) -> vol.Schema:
                 ),
                 slug_validator=cv.slug,
             ),
-            vol.Optional("exceptions"): cv.schema_with_slug_keys(
-                {vol.Optional("message"): translation_value_validator},
-                slug_validator=cv.slug,
-            ),
+            **_EXCEPTIONS_SCHEMA,
             vol.Optional("services"): cv.schema_with_slug_keys(
                 {
                     vol.Required("name"): translation_value_validator,
@@ -367,6 +386,13 @@ def gen_strings_schema(config: Config, integration: Integration) -> vol.Schema:
                         },
                         slug_validator=translation_key_validator,
                     ),
+                    vol.Optional("sections"): cv.schema_with_slug_keys(
+                        {
+                            vol.Required("name"): str,
+                            vol.Optional("description"): translation_value_validator,
+                        },
+                        slug_validator=translation_key_validator,
+                    ),
                 },
                 slug_validator=translation_key_validator,
             ),
@@ -375,6 +401,7 @@ def gen_strings_schema(config: Config, integration: Integration) -> vol.Schema:
                     vol.Required("done"): translation_value_validator,
                 },
             },
+            vol.Optional("common"): vol.Schema({cv.slug: translation_value_validator}),
         }
     )
 
@@ -392,6 +419,7 @@ def gen_auth_schema(config: Config, integration: Integration) -> vol.Schema:
                 )
             },
             vol.Optional("issues"): gen_issues_schema(config, integration),
+            **_EXCEPTIONS_SCHEMA,
         }
     )
 

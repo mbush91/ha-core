@@ -7,10 +7,10 @@ import asyncio
 import base64
 import collections.abc
 from collections.abc import Callable, Generator, Iterable
-from contextlib import AbstractContextManager, suppress
+from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from datetime import date, datetime, time, timedelta
-from functools import cache, lru_cache, partial, wraps
+from functools import cache, cached_property, lru_cache, partial, wraps
 import json
 import logging
 import math
@@ -22,17 +22,7 @@ import statistics
 from struct import error as StructError, pack, unpack_from
 import sys
 from types import CodeType, TracebackType
-from typing import (
-    Any,
-    Concatenate,
-    Literal,
-    NoReturn,
-    ParamSpec,
-    Self,
-    TypeVar,
-    cast,
-    overload,
-)
+from typing import Any, Concatenate, Literal, NoReturn, Self, cast, overload
 from urllib.parse import urlencode as urllib_urlencode
 import weakref
 
@@ -61,6 +51,7 @@ from homeassistant.const import (
 from homeassistant.core import (
     Context,
     HomeAssistant,
+    ServiceResponse,
     State,
     callback,
     split_entity_id,
@@ -90,6 +81,7 @@ from . import (
     label_registry,
     location as loc_helper,
 )
+from .deprecation import deprecated_function
 from .singleton import singleton
 from .translation import async_translate_state
 from .typing import TemplateVarsType
@@ -109,7 +101,6 @@ _ENVIRONMENT_STRICT: HassKey[TemplateEnvironment] = HassKey(
 )
 _HASS_LOADER = "template.hass_loader"
 
-_RE_JINJA_DELIMITERS = re.compile(r"\{%|\{\{|\{#")
 # Match "simple" ints and floats. -1.0, 1, +5, 5.0
 _IS_NUMERIC = re.compile(r"^[+-]?(?!0\d)\d*(?:\.\d*)?$")
 
@@ -119,9 +110,6 @@ _RESERVED_NAMES = {
     "environmentfunction",
     "jinja_pass_arg",
 }
-
-_GROUP_DOMAIN_PREFIX = "group."
-_ZONE_DOMAIN_PREFIX = "zone."
 
 _COLLECTABLE_STATE_ATTRIBUTES = {
     "state",
@@ -133,10 +121,6 @@ _COLLECTABLE_STATE_ATTRIBUTES = {
     "object_id",
     "name",
 }
-
-_T = TypeVar("_T")
-_R = TypeVar("_R")
-_P = ParamSpec("_P")
 
 ALL_STATES_RATE_LIMIT = 60  # seconds
 DOMAIN_STATES_RATE_LIMIT = 1  # seconds
@@ -167,6 +151,7 @@ CACHED_TEMPLATE_STATES = 512
 EVAL_CACHE_SIZE = 512
 
 MAX_CUSTOM_TEMPLATE_SIZE = 5 * 1024 * 1024
+MAX_TEMPLATE_OUTPUT = 256 * 1024  # 256KiB
 
 CACHED_TEMPLATE_LRU: LRU[State, TemplateState] = LRU(CACHED_TEMPLATE_STATES)
 CACHED_TEMPLATE_NO_COLLECT_LRU: LRU[State, TemplateState] = LRU(CACHED_TEMPLATE_STATES)
@@ -223,15 +208,24 @@ def async_setup(hass: HomeAssistant) -> bool:
 
 
 @bind_hass
+@deprecated_function(
+    "automatic setting of Template.hass introduced by HA Core PR #89242",
+    breaks_in_ha_version="2025.10",
+)
 def attach(hass: HomeAssistant, obj: Any) -> None:
+    """Recursively attach hass to all template instances in list and dict."""
+    return _attach(hass, obj)
+
+
+def _attach(hass: HomeAssistant, obj: Any) -> None:
     """Recursively attach hass to all template instances in list and dict."""
     if isinstance(obj, list):
         for child in obj:
-            attach(hass, child)
+            _attach(hass, child)
     elif isinstance(obj, collections.abc.Mapping):
         for child_key, child_value in obj.items():
-            attach(hass, child_key)
-            attach(hass, child_value)
+            _attach(hass, child_key)
+            _attach(hass, child_value)
     elif isinstance(obj, Template):
         obj.hass = hass
 
@@ -275,7 +269,9 @@ def is_complex(value: Any) -> bool:
 
 def is_template_string(maybe_template: str) -> bool:
     """Check if the input is a Jinja2 template."""
-    return _RE_JINJA_DELIMITERS.search(maybe_template) is not None
+    return "{" in maybe_template and (
+        "{%" in maybe_template or "{{" in maybe_template or "{#" in maybe_template
+    )
 
 
 class ResultWrapper:
@@ -343,7 +339,33 @@ def _false(arg: str) -> bool:
     return False
 
 
-_cached_literal_eval = lru_cache(maxsize=EVAL_CACHE_SIZE)(literal_eval)
+@lru_cache(maxsize=EVAL_CACHE_SIZE)
+def _cached_parse_result(render_result: str) -> Any:
+    """Parse a result and cache the result."""
+    result = literal_eval(render_result)
+    if type(result) in RESULT_WRAPPERS:
+        result = RESULT_WRAPPERS[type(result)](result, render_result=render_result)
+
+    # If the literal_eval result is a string, use the original
+    # render, by not returning right here. The evaluation of strings
+    # resulting in strings impacts quotes, to avoid unexpected
+    # output; use the original render instead of the evaluated one.
+    # Complex and scientific values are also unexpected. Filter them out.
+    if (
+        # Filter out string and complex numbers
+        not isinstance(result, (str, complex))
+        and (
+            # Pass if not numeric and not a boolean
+            not isinstance(result, (int, float))
+            # Or it's a boolean (inherit from int)
+            or isinstance(result, bool)
+            # Or if it's a digit
+            or _IS_NUMERIC.match(render_result) is not None
+        )
+    ):
+        return result
+
+    return render_result
 
 
 class RenderInfo:
@@ -485,9 +507,25 @@ class Template:
     )
 
     def __init__(self, template: str, hass: HomeAssistant | None = None) -> None:
-        """Instantiate a template."""
+        """Instantiate a template.
+
+        Note: A valid hass instance should always be passed in. The hass parameter
+        will be non optional in Home Assistant Core 2025.10.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from .frame import report
+
         if not isinstance(template, str):
             raise TypeError("Expected template to be a string")
+
+        if not hass:
+            report(
+                (
+                    "creates a template object without passing hass, "
+                    "which will stop working in HA Core 2025.10"
+                ),
+                error_if_core=False,
+            )
 
         self.template: str = template.strip()
         self._compiled_code: CodeType | None = None
@@ -524,11 +562,15 @@ class Template:
 
     def ensure_valid(self) -> None:
         """Return if template is valid."""
+        if self.is_static or self._compiled_code is not None:
+            return
+
+        if compiled := self._env.template_cache.get(self.template):
+            self._compiled_code = compiled
+            return
+
         with _template_context_manager as cm:
             cm.set_template(self.template, "compiling")
-            if self.is_static or self._compiled_code is not None:
-                return
-
             try:
                 self._compiled_code = self._env.compile(self.template)
             except jinja2.TemplateError as err:
@@ -590,6 +632,11 @@ class Template:
         except Exception as err:
             raise TemplateError(err) from err
 
+        if len(render_result) > MAX_TEMPLATE_OUTPUT:
+            raise TemplateError(
+                f"Template output exceeded maximum size of {MAX_TEMPLATE_OUTPUT} characters"
+            )
+
         render_result = render_result.strip()
 
         if not parse_result or self.hass and self.hass.config.legacy_templates:
@@ -600,31 +647,7 @@ class Template:
     def _parse_result(self, render_result: str) -> Any:
         """Parse the result."""
         try:
-            result = _cached_literal_eval(render_result)
-
-            if type(result) in RESULT_WRAPPERS:
-                result = RESULT_WRAPPERS[type(result)](
-                    result, render_result=render_result
-                )
-
-            # If the literal_eval result is a string, use the original
-            # render, by not returning right here. The evaluation of strings
-            # resulting in strings impacts quotes, to avoid unexpected
-            # output; use the original render instead of the evaluated one.
-            # Complex and scientific values are also unexpected. Filter them out.
-            if (
-                # Filter out string and complex numbers
-                not isinstance(result, (str, complex))
-                and (
-                    # Pass if not numeric and not a boolean
-                    not isinstance(result, (int, float))
-                    # Or it's a boolean (inherit from int)
-                    or isinstance(result, bool)
-                    # Or if it's a digit
-                    or _IS_NUMERIC.match(render_result) is not None
-                )
-            ):
-                return result
+            return _cached_parse_result(render_result)
         except (ValueError, TypeError, SyntaxError, MemoryError):
             pass
 
@@ -702,9 +725,18 @@ class Template:
         if self.hass and self.hass.config.debug:
             self.hass.verify_event_loop_thread("async_render_to_info")
         self._renders += 1
-        assert self.hass and _render_info.get() is None
 
         render_info = RenderInfo(self)
+
+        if not self.hass:
+            raise RuntimeError(f"hass not set while rendering {self}")
+
+        if _render_info.get() is not None:
+            raise RuntimeError(
+                f"RenderInfo already set while rendering {self}, "
+                "this usually indicates the template is being rendered "
+                "in the wrong thread"
+            )
 
         if self.is_static:
             render_info._result = self.template.strip()  # noqa: SLF001
@@ -763,8 +795,10 @@ class Template:
         variables = dict(variables or {})
         variables["value"] = value
 
-        with suppress(*JSON_DECODE_EXCEPTIONS):
+        try:  # noqa: SIM105 - suppress is much slower
             variables["value_json"] = json_loads(value)
+        except JSON_DECODE_EXCEPTIONS:
+            pass
 
         try:
             render_result = _render_with_context(
@@ -881,7 +915,7 @@ class AllStates:
         if (render_info := _render_info.get()) is not None:
             render_info.all_states_lifecycle = True
 
-    def __iter__(self) -> Generator[TemplateState, None, None]:
+    def __iter__(self) -> Generator[TemplateState]:
         """Return all states."""
         self._collect_all()
         return _state_generator(self._hass, None)
@@ -971,7 +1005,7 @@ class DomainStates:
         if (entity_collect := _render_info.get()) is not None:
             entity_collect.domains_lifecycle.add(self._domain)  # type: ignore[attr-defined]
 
-    def __iter__(self) -> Generator[TemplateState, None, None]:
+    def __iter__(self) -> Generator[TemplateState]:
         """Return the iteration over all the states."""
         self._collect_domain()
         return _state_generator(self._hass, self._domain)
@@ -1021,7 +1055,7 @@ class TemplateStateBase(State):
             return self.state_with_unit
         raise KeyError
 
-    @property
+    @cached_property
     def entity_id(self) -> str:  # type: ignore[override]
         """Wrap State.entity_id.
 
@@ -1159,7 +1193,7 @@ def _collect_state(hass: HomeAssistant, entity_id: str) -> None:
 
 def _state_generator(
     hass: HomeAssistant, domain: str | None
-) -> Generator[TemplateState, None, None]:
+) -> Generator[TemplateState]:
     """State generator for a domain or all states."""
     states = hass.states
     # If domain is None, we want to iterate over all states, but making
@@ -1217,10 +1251,10 @@ def forgiving_boolean(value: Any) -> bool | object: ...
 
 
 @overload
-def forgiving_boolean(value: Any, default: _T) -> bool | _T: ...
+def forgiving_boolean[_T](value: Any, default: _T) -> bool | _T: ...
 
 
-def forgiving_boolean(
+def forgiving_boolean[_T](
     value: Any, default: _T | object = _SENTINEL
 ) -> bool | _T | object:
     """Try to convert value to a boolean."""
@@ -1377,6 +1411,24 @@ def device_attr(hass: HomeAssistant, device_or_entity_id: str, attr_name: str) -
     if device is None or not hasattr(device, attr_name):
         return None
     return getattr(device, attr_name)
+
+
+def config_entry_attr(
+    hass: HomeAssistant, config_entry_id_: str, attr_name: str
+) -> Any:
+    """Get config entry specific attribute."""
+    if not isinstance(config_entry_id_, str):
+        raise TemplateError("Must provide a config entry ID")
+
+    if attr_name not in ("domain", "title", "state", "source", "disabled_by"):
+        raise TemplateError("Invalid config entry attribute")
+
+    config_entry = hass.config_entries.async_get_entry(config_entry_id_)
+
+    if config_entry is None:
+        return None
+
+    return getattr(config_entry, attr_name)
 
 
 def is_device_attr(
@@ -2093,6 +2145,62 @@ def as_timedelta(value: str) -> timedelta | None:
     return dt_util.parse_duration(value)
 
 
+def merge_response(value: ServiceResponse) -> list[Any]:
+    """Merge action responses into single list.
+
+    Checks that the input is a correct service response:
+    {
+        "entity_id": {str: dict[str, Any]},
+    }
+    If response is a single list, it will extend the list with the items
+        and add the entity_id and value_key to each dictionary for reference.
+    If response is a dictionary or multiple lists,
+        it will append the dictionary/lists to the list
+        and add the entity_id to each dictionary for reference.
+    """
+    if not isinstance(value, dict):
+        raise TypeError("Response is not a dictionary")
+    if not value:
+        # Bail out early if response is an empty dictionary
+        return []
+
+    is_single_list = False
+    response_items: list = []
+    for entity_id, entity_response in value.items():  # pylint: disable=too-many-nested-blocks
+        if not isinstance(entity_response, dict):
+            raise TypeError("Response is not a dictionary")
+        for value_key, type_response in entity_response.items():
+            if len(entity_response) == 1 and isinstance(type_response, list):
+                # Provides special handling for responses such as calendar events
+                # and weather forecasts where the response contains a single list with multiple
+                # dictionaries inside.
+                is_single_list = True
+                for dict_in_list in type_response:
+                    if isinstance(dict_in_list, dict):
+                        if ATTR_ENTITY_ID in dict_in_list:
+                            raise ValueError(
+                                f"Response dictionary already contains key '{ATTR_ENTITY_ID}'"
+                            )
+                        dict_in_list[ATTR_ENTITY_ID] = entity_id
+                        dict_in_list["value_key"] = value_key
+                response_items.extend(type_response)
+            else:
+                # Break the loop if not a single list as the logic is then managed in the outer loop
+                # which handles both dictionaries and in the case of multiple lists.
+                break
+
+        if not is_single_list:
+            _response = entity_response.copy()
+            if ATTR_ENTITY_ID in _response:
+                raise ValueError(
+                    f"Response dictionary already contains key '{ATTR_ENTITY_ID}'"
+                )
+            _response[ATTR_ENTITY_ID] = entity_id
+            response_items.append(_response)
+
+    return response_items
+
+
 def strptime(string, fmt, default=_SENTINEL):
     """Parse a time string to datetime."""
     try:
@@ -2308,7 +2416,7 @@ def regex_match(value, find="", ignorecase=False):
     """Match value using regex."""
     if not isinstance(value, str):
         value = str(value)
-    flags = re.I if ignorecase else 0
+    flags = re.IGNORECASE if ignorecase else 0
     return bool(_regex_cache(find, flags).match(value))
 
 
@@ -2319,7 +2427,7 @@ def regex_replace(value="", find="", replace="", ignorecase=False):
     """Replace using regex."""
     if not isinstance(value, str):
         value = str(value)
-    flags = re.I if ignorecase else 0
+    flags = re.IGNORECASE if ignorecase else 0
     return _regex_cache(find, flags).sub(replace, value)
 
 
@@ -2327,7 +2435,7 @@ def regex_search(value, find="", ignorecase=False):
     """Search using regex."""
     if not isinstance(value, str):
         value = str(value)
-    flags = re.I if ignorecase else 0
+    flags = re.IGNORECASE if ignorecase else 0
     return bool(_regex_cache(find, flags).search(value))
 
 
@@ -2340,7 +2448,7 @@ def regex_findall(value, find="", ignorecase=False):
     """Find all matches using regex."""
     if not isinstance(value, str):
         value = str(value)
-    flags = re.I if ignorecase else 0
+    flags = re.IGNORECASE if ignorecase else 0
     return _regex_cache(find, flags).findall(value)
 
 
@@ -2395,20 +2503,25 @@ def struct_unpack(value: bytes, format_string: str, offset: int = 0) -> Any | No
         return None
 
 
-def base64_encode(value):
+def base64_encode(value: str) -> str:
     """Perform base64 encode."""
     return base64.b64encode(value.encode("utf-8")).decode("utf-8")
 
 
-def base64_decode(value):
-    """Perform base64 denode."""
-    return base64.b64decode(value).decode("utf-8")
+def base64_decode(value: str, encoding: str | None = "utf-8") -> str | bytes:
+    """Perform base64 decode."""
+    decoded = base64.b64decode(value)
+    if encoding:
+        return decoded.decode(encoding)
+
+    return decoded
 
 
 def ordinal(value):
     """Perform ordinal conversion."""
+    suffixes = ["th", "st", "nd", "rd"] + ["th"] * 6  # codespell:ignore nd
     return str(value) + (
-        list(["th", "st", "nd", "rd"] + ["th"] * 6)[(int(str(value)[-1])) % 10]
+        suffixes[(int(str(value)[-1])) % 10]
         if int(str(value)[-2:]) % 100 not in range(11, 14)
         else "th"
     )
@@ -2734,7 +2847,7 @@ class TemplateEnvironment(ImmutableSandboxedEnvironment):
         super().__init__(undefined=make_logging_undefined(strict, log_fn))
         self.hass = hass
         self.template_cache: weakref.WeakValueDictionary[
-            str | jinja2.nodes.Template, CodeType | str | None
+            str | jinja2.nodes.Template, CodeType | None
         ] = weakref.WeakValueDictionary()
         self.add_extension("jinja2.ext.loopcontrols")
         self.filters["round"] = forgiving_round
@@ -2803,6 +2916,7 @@ class TemplateEnvironment(ImmutableSandboxedEnvironment):
         self.globals["as_timedelta"] = as_timedelta
         self.globals["as_timestamp"] = forgiving_as_timestamp
         self.globals["timedelta"] = timedelta
+        self.globals["merge_response"] = merge_response
         self.globals["strptime"] = strptime
         self.globals["urlencode"] = urlencode
         self.globals["average"] = average
@@ -2820,6 +2934,7 @@ class TemplateEnvironment(ImmutableSandboxedEnvironment):
         self.globals["iif"] = iif
         self.globals["bool"] = forgiving_boolean
         self.globals["version"] = version
+        self.globals["zip"] = zip
         self.tests["is_number"] = is_number
         self.tests["list"] = _is_list
         self.tests["set"] = _is_set
@@ -2840,7 +2955,7 @@ class TemplateEnvironment(ImmutableSandboxedEnvironment):
         # evaluated fresh with every execution, rather than executed
         # at compile time and the value stored. The context itself
         # can be discarded, we only need to get at the hass object.
-        def hassfunction(
+        def hassfunction[**_P, _R](
             func: Callable[Concatenate[HomeAssistant, _P], _R],
             jinja_context: Callable[
                 [Callable[Concatenate[Any, _P], _R]],
@@ -2860,6 +2975,9 @@ class TemplateEnvironment(ImmutableSandboxedEnvironment):
 
         self.globals["device_attr"] = hassfunction(device_attr)
         self.filters["device_attr"] = self.globals["device_attr"]
+
+        self.globals["config_entry_attr"] = hassfunction(config_entry_attr)
+        self.filters["config_entry_attr"] = self.globals["config_entry_attr"]
 
         self.globals["is_device_attr"] = hassfunction(is_device_attr)
         self.tests["is_device_attr"] = hassfunction(is_device_attr, pass_eval_context)
@@ -3038,7 +3156,7 @@ class TemplateEnvironment(ImmutableSandboxedEnvironment):
         return super().is_safe_attribute(obj, attr, value)
 
     @overload
-    def compile(  # type: ignore[overload-overlap]
+    def compile(
         self,
         source: str | jinja2.nodes.Template,
         name: str | None = None,
@@ -3083,10 +3201,9 @@ class TemplateEnvironment(ImmutableSandboxedEnvironment):
                 defer_init,
             )
 
-        if (cached := self.template_cache.get(source)) is None:
-            cached = self.template_cache[source] = super().compile(source)
-
-        return cached
+        compiled = super().compile(source)
+        self.template_cache[source] = compiled
+        return compiled
 
 
 _NO_HASS_ENV = TemplateEnvironment(None)

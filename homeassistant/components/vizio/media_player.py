@@ -34,7 +34,6 @@ from homeassistant.helpers.dispatcher import (
 )
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import VizioAppsDataUpdateCoordinator
 from .const import (
     CONF_ADDITIONAL_CONFIGS,
     CONF_APPS,
@@ -53,6 +52,7 @@ from .const import (
     VIZIO_SOUND_MODE,
     VIZIO_VOLUME,
 )
+from .coordinator import VizioAppsDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -200,7 +200,7 @@ class VizioDevice(MediaPlayerEntity):
             return
 
         if not self._attr_available:
-            _LOGGER.info(
+            _LOGGER.warning(
                 "Restored connection to %s", self._config_entry.data[CONF_HOST]
             )
             self._attr_available = True

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import logging
-from typing import Any, Concatenate, ParamSpec, TypeVar, cast
+from typing import Any, Concatenate, cast
 
 from limitlessled import Color
 from limitlessled.bridge import Bridge
@@ -27,7 +27,7 @@ from homeassistant.components.light import (
     EFFECT_COLORLOOP,
     EFFECT_WHITE,
     FLASH_LONG,
-    PLATFORM_SCHEMA,
+    PLATFORM_SCHEMA as LIGHT_PLATFORM_SCHEMA,
     ColorMode,
     LightEntity,
     LightEntityFeature,
@@ -39,9 +39,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.util.color import color_hs_to_RGB, color_temperature_mired_to_kelvin
-
-_LimitlessLEDGroupT = TypeVar("_LimitlessLEDGroupT", bound="LimitlessLEDGroup")
-_P = ParamSpec("_P")
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -78,7 +75,7 @@ SUPPORT_LIMITLESSLED_RGBWW = (
     LightEntityFeature.EFFECT | LightEntityFeature.FLASH | LightEntityFeature.TRANSITION
 )
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+PLATFORM_SCHEMA = LIGHT_PLATFORM_SCHEMA.extend(
     {
         vol.Required(CONF_BRIDGES): vol.All(
             cv.ensure_list,
@@ -122,13 +119,13 @@ def rewrite_legacy(config: ConfigType) -> ConfigType:
         else:
             _LOGGER.warning("Legacy configuration format detected")
             for i in range(1, 5):
-                name_key = "group_%d_name" % i
+                name_key = f"group_{i}_name"
                 if name_key in bridge_conf:
                     groups.append(
                         {
                             "number": i,
                             "type": bridge_conf.get(
-                                "group_%d_type" % i, DEFAULT_LED_TYPE
+                                f"group_{i}_type", DEFAULT_LED_TYPE
                             ),
                             "name": bridge_conf.get(name_key),
                         }
@@ -176,7 +173,7 @@ def setup_platform(
     add_entities(lights)
 
 
-def state(
+def state[_LimitlessLEDGroupT: LimitlessLEDGroup, **_P](
     new_state: bool,
 ) -> Callable[
     [Callable[Concatenate[_LimitlessLEDGroupT, int, Pipeline, _P], Any]],

@@ -126,7 +126,7 @@ class SsdpServiceInfo(BaseServiceInfo):
 
 
 SsdpChange = Enum("SsdpChange", "ALIVE BYEBYE UPDATE")
-SsdpHassJobCallback = HassJob[
+type SsdpHassJobCallback = HassJob[
     [SsdpServiceInfo, SsdpChange], Coroutine[Any, Any, None] | None
 ]
 
@@ -148,7 +148,7 @@ def _format_err(name: str, *args: Any) -> str:
 async def async_register_callback(
     hass: HomeAssistant,
     callback: Callable[[SsdpServiceInfo, SsdpChange], Coroutine[Any, Any, None] | None],
-    match_dict: None | dict[str, str] = None,
+    match_dict: dict[str, str] | None = None,
 ) -> Callable[[], None]:
     """Register to receive a callback on ssdp broadcast.
 
@@ -284,16 +284,13 @@ class IntegrationMatchers:
     def async_matching_domains(self, info_with_desc: CaseInsensitiveDict) -> set[str]:
         """Find domains matching the passed CaseInsensitiveDict."""
         assert self._match_by_key is not None
-        domains = set()
-        for key, matchers_by_key in self._match_by_key.items():
-            if not (match_value := info_with_desc.get(key)):
-                continue
-            for domain, matcher in matchers_by_key.get(match_value, []):
-                if domain in domains:
-                    continue
-                if all(info_with_desc.get(k) == v for (k, v) in matcher.items()):
-                    domains.add(domain)
-        return domains
+        return {
+            domain
+            for key, matchers_by_key in self._match_by_key.items()
+            if (match_value := info_with_desc.get(key))
+            for domain, matcher in matchers_by_key.get(match_value, ())
+            if info_with_desc.items() >= matcher.items()
+        }
 
 
 class Scanner:
@@ -317,7 +314,7 @@ class Scanner:
         return list(self._device_tracker.devices.values())
 
     async def async_register_callback(
-        self, callback: SsdpHassJobCallback, match_dict: None | dict[str, str] = None
+        self, callback: SsdpHassJobCallback, match_dict: dict[str, str] | None = None
     ) -> Callable[[], None]:
         """Register a callback."""
         if match_dict is None:

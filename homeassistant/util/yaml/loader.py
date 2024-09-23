@@ -215,18 +215,26 @@ class SafeLineLoader(PythonSafeLoader):
         )
 
 
-LoaderType = FastSafeLoader | PythonSafeLoader
+type LoaderType = FastSafeLoader | PythonSafeLoader
 
 
 def load_yaml(
     fname: str | os.PathLike[str], secrets: Secrets | None = None
 ) -> JSON_TYPE | None:
-    """Load a YAML file."""
+    """Load a YAML file.
+
+    If opening the file raises an OSError it will be wrapped in a HomeAssistantError,
+    except for FileNotFoundError which will be re-raised.
+    """
     try:
         with open(fname, encoding="utf-8") as conf_file:
             return parse_yaml(conf_file, secrets)
     except UnicodeDecodeError as exc:
         _LOGGER.error("Unable to read file %s: %s", fname, exc)
+        raise HomeAssistantError(exc) from exc
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
         raise HomeAssistantError(exc) from exc
 
 
@@ -313,6 +321,33 @@ def _add_reference(
         obj = NodeStrClass(obj)
     elif isinstance(obj, dict):
         obj = NodeDictClass(obj)
+    return _add_reference_to_node_class(obj, loader, node)
+
+
+@overload
+def _add_reference_to_node_class(
+    obj: NodeListClass, loader: LoaderType, node: yaml.nodes.Node
+) -> NodeListClass: ...
+
+
+@overload
+def _add_reference_to_node_class(
+    obj: NodeStrClass, loader: LoaderType, node: yaml.nodes.Node
+) -> NodeStrClass: ...
+
+
+@overload
+def _add_reference_to_node_class(
+    obj: NodeDictClass, loader: LoaderType, node: yaml.nodes.Node
+) -> NodeDictClass: ...
+
+
+def _add_reference_to_node_class(
+    obj: NodeDictClass | NodeListClass | NodeStrClass,
+    loader: LoaderType,
+    node: yaml.nodes.Node,
+) -> NodeDictClass | NodeListClass | NodeStrClass:
+    """Add file reference information to a node class object."""
     try:  # suppress is much slower
         obj.__config_file__ = loader.get_name
         obj.__line__ = node.start_mark.line + 1
@@ -321,6 +356,20 @@ def _add_reference(
     return obj
 
 
+def _raise_if_no_value[NodeT: yaml.nodes.Node, _R](
+    func: Callable[[LoaderType, NodeT], _R],
+) -> Callable[[LoaderType, NodeT], _R]:
+    def wrapper(loader: LoaderType, node: NodeT) -> _R:
+        if not node.value:
+            raise HomeAssistantError(
+                f"{node.start_mark}: {node.tag} needs an argument."
+            )
+        return func(loader, node)
+
+    return wrapper
+
+
+@_raise_if_no_value
 def _include_yaml(loader: LoaderType, node: yaml.nodes.Node) -> JSON_TYPE:
     """Load another YAML file and embed it using the !include tag.
 
@@ -336,7 +385,7 @@ def _include_yaml(loader: LoaderType, node: yaml.nodes.Node) -> JSON_TYPE:
         return _add_reference(loaded_yaml, loader, node)
     except FileNotFoundError as exc:
         raise HomeAssistantError(
-            f"{node.start_mark}: Unable to read file {fname}."
+            f"{node.start_mark}: Unable to read file {fname}"
         ) from exc
 
 
@@ -355,6 +404,7 @@ def _find_files(directory: str, pattern: str) -> Iterator[str]:
                 yield filename
 
 
+@_raise_if_no_value
 def _include_dir_named_yaml(loader: LoaderType, node: yaml.nodes.Node) -> NodeDictClass:
     """Load multiple files from directory as a dictionary."""
     mapping = NodeDictClass()
@@ -369,9 +419,10 @@ def _include_dir_named_yaml(loader: LoaderType, node: yaml.nodes.Node) -> NodeDi
             # as an empty dictionary
             loaded_yaml = NodeDictClass()
         mapping[filename] = loaded_yaml
-    return _add_reference(mapping, loader, node)
+    return _add_reference_to_node_class(mapping, loader, node)
 
 
+@_raise_if_no_value
 def _include_dir_merge_named_yaml(
     loader: LoaderType, node: yaml.nodes.Node
 ) -> NodeDictClass:
@@ -384,9 +435,10 @@ def _include_dir_merge_named_yaml(
         loaded_yaml = load_yaml(fname, loader.secrets)
         if isinstance(loaded_yaml, dict):
             mapping.update(loaded_yaml)
-    return _add_reference(mapping, loader, node)
+    return _add_reference_to_node_class(mapping, loader, node)
 
 
+@_raise_if_no_value
 def _include_dir_list_yaml(
     loader: LoaderType, node: yaml.nodes.Node
 ) -> list[JSON_TYPE]:
@@ -400,6 +452,7 @@ def _include_dir_list_yaml(
     ]
 
 
+@_raise_if_no_value
 def _include_dir_merge_list_yaml(
     loader: LoaderType, node: yaml.nodes.Node
 ) -> JSON_TYPE:
@@ -453,7 +506,7 @@ def _handle_mapping_tag(
             )
         seen[key] = line
 
-    return _add_reference(NodeDictClass(nodes), loader, node)
+    return _add_reference_to_node_class(NodeDictClass(nodes), loader, node)
 
 
 def _construct_seq(loader: LoaderType, node: yaml.nodes.Node) -> JSON_TYPE:
@@ -469,7 +522,7 @@ def _handle_scalar_tag(
     obj = node.value
     if not isinstance(obj, str):
         return obj
-    return _add_reference(obj, loader, node)
+    return _add_reference_to_node_class(NodeStrClass(obj), loader, node)
 
 
 def _env_var_yaml(loader: LoaderType, node: yaml.nodes.Node) -> str:

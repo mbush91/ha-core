@@ -48,11 +48,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError
-import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.config_validation import (  # noqa: F401
-    PLATFORM_SCHEMA,
-    PLATFORM_SCHEMA_BASE,
-)
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.deprecation import (
     DeprecatedConstantEnum,
     all_with_deprecated_constants,
@@ -64,7 +60,7 @@ from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.template import Template
-from homeassistant.helpers.typing import ConfigType
+from homeassistant.helpers.typing import ConfigType, VolDictType
 from homeassistant.loader import bind_hass
 
 from .const import (  # noqa: F401
@@ -77,6 +73,7 @@ from .const import (  # noqa: F401
     DATA_CAMERA_PREFS,
     DATA_RTSP_TO_WEB_RTC,
     DOMAIN,
+    DOMAIN_DATA,
     PREF_ORIENTATION,
     PREF_PRELOAD_STREAM,
     SERVICE_RECORD,
@@ -87,13 +84,15 @@ from .prefs import CameraPreferences, DynamicStreamSettings  # noqa: F401
 
 _LOGGER = logging.getLogger(__name__)
 
+ENTITY_ID_FORMAT: Final = DOMAIN + ".{}"
+PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA
+PLATFORM_SCHEMA_BASE = cv.PLATFORM_SCHEMA_BASE
+SCAN_INTERVAL: Final = timedelta(seconds=30)
+
 SERVICE_ENABLE_MOTION: Final = "enable_motion_detection"
 SERVICE_DISABLE_MOTION: Final = "disable_motion_detection"
 SERVICE_SNAPSHOT: Final = "snapshot"
 SERVICE_PLAY_STREAM: Final = "play_stream"
-
-SCAN_INTERVAL: Final = timedelta(seconds=30)
-ENTITY_ID_FORMAT: Final = DOMAIN + ".{}"
 
 ATTR_FILENAME: Final = "filename"
 ATTR_MEDIA_PLAYER: Final = "media_player"
@@ -130,14 +129,14 @@ _RND: Final = SystemRandom()
 
 MIN_STREAM_INTERVAL: Final = 0.5  # seconds
 
-CAMERA_SERVICE_SNAPSHOT: Final = {vol.Required(ATTR_FILENAME): cv.template}
+CAMERA_SERVICE_SNAPSHOT: VolDictType = {vol.Required(ATTR_FILENAME): cv.template}
 
-CAMERA_SERVICE_PLAY_STREAM: Final = {
+CAMERA_SERVICE_PLAY_STREAM: VolDictType = {
     vol.Required(ATTR_MEDIA_PLAYER): cv.entities_domain(DOMAIN_MP),
     vol.Optional(ATTR_FORMAT, default="hls"): vol.In(OUTPUT_FORMATS),
 }
 
-CAMERA_SERVICE_RECORD: Final = {
+CAMERA_SERVICE_RECORD: VolDictType = {
     vol.Required(CONF_FILENAME): cv.template,
     vol.Optional(CONF_DURATION, default=30): vol.Coerce(int),
     vol.Optional(CONF_LOOKBACK, default=0): vol.Coerce(int),
@@ -335,7 +334,7 @@ def _get_camera_from_entity_id(hass: HomeAssistant, entity_id: str) -> Camera:
 #     stream_id: A unique id for the stream, used to update an existing source
 # The output is the SDP answer, or None if the source or offer is not eligible.
 # The Callable may throw HomeAssistantError on failure.
-RtspToWebRtcProviderType = Callable[[str, str, str], Awaitable[str | None]]
+type RtspToWebRtcProviderType = Callable[[str, str, str], Awaitable[str | None]]
 
 
 def async_register_rtsp_to_web_rtc_provider(
@@ -364,7 +363,7 @@ def async_register_rtsp_to_web_rtc_provider(
 async def _async_refresh_providers(hass: HomeAssistant) -> None:
     """Check all cameras for any state changes for registered providers."""
 
-    component: EntityComponent[Camera] = hass.data[DOMAIN]
+    component = hass.data[DOMAIN_DATA]
     await asyncio.gather(
         *(camera.async_refresh_providers() for camera in component.entities)
     )
@@ -374,15 +373,13 @@ def _async_get_rtsp_to_web_rtc_providers(
     hass: HomeAssistant,
 ) -> Iterable[RtspToWebRtcProviderType]:
     """Return registered RTSP to WebRTC providers."""
-    providers: dict[str, RtspToWebRtcProviderType] = hass.data.get(
-        DATA_RTSP_TO_WEB_RTC, {}
-    )
+    providers = hass.data.get(DATA_RTSP_TO_WEB_RTC, {})
     return providers.values()
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the camera component."""
-    component = hass.data[DOMAIN] = EntityComponent[Camera](
+    component = hass.data[DOMAIN_DATA] = EntityComponent[Camera](
         _LOGGER, DOMAIN, hass, SCAN_INTERVAL
     )
 
@@ -433,13 +430,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, unsub_track_time_interval)
 
     component.async_register_entity_service(
-        SERVICE_ENABLE_MOTION, {}, "async_enable_motion_detection"
+        SERVICE_ENABLE_MOTION, None, "async_enable_motion_detection"
     )
     component.async_register_entity_service(
-        SERVICE_DISABLE_MOTION, {}, "async_disable_motion_detection"
+        SERVICE_DISABLE_MOTION, None, "async_disable_motion_detection"
     )
-    component.async_register_entity_service(SERVICE_TURN_OFF, {}, "async_turn_off")
-    component.async_register_entity_service(SERVICE_TURN_ON, {}, "async_turn_on")
+    component.async_register_entity_service(SERVICE_TURN_OFF, None, "async_turn_off")
+    component.async_register_entity_service(SERVICE_TURN_ON, None, "async_turn_on")
     component.async_register_entity_service(
         SERVICE_SNAPSHOT, CAMERA_SERVICE_SNAPSHOT, async_handle_snapshot_service
     )
@@ -457,14 +454,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a config entry."""
-    component: EntityComponent[Camera] = hass.data[DOMAIN]
-    return await component.async_setup_entry(entry)
+    return await hass.data[DOMAIN_DATA].async_setup_entry(entry)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    component: EntityComponent[Camera] = hass.data[DOMAIN]
-    return await component.async_unload_entry(entry)
+    return await hass.data[DOMAIN_DATA].async_unload_entry(entry)
 
 
 CACHED_PROPERTIES_WITH_ATTR_ = {
@@ -698,11 +693,11 @@ class Camera(Entity, cached_properties=CACHED_PROPERTIES_WITH_ATTR_):
         await self.hass.async_add_executor_job(self.turn_off)
 
     def turn_on(self) -> None:
-        """Turn off camera."""
+        """Turn on camera."""
         raise NotImplementedError
 
     async def async_turn_on(self) -> None:
-        """Turn off camera."""
+        """Turn on camera."""
         await self.hass.async_add_executor_job(self.turn_on)
 
     def enable_motion_detection(self) -> None:
@@ -864,7 +859,7 @@ class CameraMjpegStream(CameraView):
             # Compose camera stream from stills
             interval = float(interval_str)
             if interval < MIN_STREAM_INTERVAL:
-                raise ValueError(f"Stream interval must be > {MIN_STREAM_INTERVAL}")
+                raise ValueError(f"Stream interval must be > {MIN_STREAM_INTERVAL}")  # noqa: TRY301
             return await camera.handle_async_still_stream(request, interval)
         except ValueError as err:
             raise web.HTTPBadRequest from err
@@ -955,8 +950,9 @@ async def websocket_get_prefs(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Handle request for account info."""
-    prefs: CameraPreferences = hass.data[DATA_CAMERA_PREFS]
-    stream_prefs = await prefs.get_dynamic_stream_settings(msg["entity_id"])
+    stream_prefs = await hass.data[DATA_CAMERA_PREFS].get_dynamic_stream_settings(
+        msg["entity_id"]
+    )
     connection.send_result(msg["id"], asdict(stream_prefs))
 
 
@@ -973,14 +969,14 @@ async def websocket_update_prefs(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Handle request for account info."""
-    prefs: CameraPreferences = hass.data[DATA_CAMERA_PREFS]
-
     changes = dict(msg)
     changes.pop("id")
     changes.pop("type")
     entity_id = changes.pop("entity_id")
     try:
-        entity_prefs = await prefs.async_update(entity_id, **changes)
+        entity_prefs = await hass.data[DATA_CAMERA_PREFS].async_update(
+            entity_id, **changes
+        )
     except HomeAssistantError as ex:
         _LOGGER.error("Error setting camera preferences: %s", ex)
         connection.send_error(msg["id"], "update_failed", str(ex))
@@ -994,7 +990,6 @@ async def async_handle_snapshot_service(
     """Handle snapshot services calls."""
     hass = camera.hass
     filename: Template = service_call.data[ATTR_FILENAME]
-    filename.hass = hass
 
     snapshot_file = filename.async_render(variables={ATTR_ENTITY_ID: camera})
 
@@ -1071,9 +1066,7 @@ async def async_handle_record_service(
     if not stream:
         raise HomeAssistantError(f"{camera.entity_id} does not support record service")
 
-    hass = camera.hass
     filename = service_call.data[CONF_FILENAME]
-    filename.hass = hass
     video_path = filename.async_render(variables={ATTR_ENTITY_ID: camera})
 
     await stream.async_record(

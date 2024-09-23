@@ -22,8 +22,8 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import TuyaConfigEntry
-from .base import TuyaEntity
 from .const import TUYA_DISCOVERY_NEW, DPCode, DPType
+from .entity import TuyaEntity
 
 
 class Mode(StrEnum):
@@ -88,6 +88,7 @@ class TuyaAlarmEntity(TuyaEntity, AlarmControlPanelEntity):
     """Tuya Alarm Entity."""
 
     _attr_name = None
+    _attr_code_arm_required = False
 
     def __init__(
         self,

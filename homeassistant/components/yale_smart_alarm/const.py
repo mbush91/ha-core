@@ -39,6 +39,8 @@ PLATFORMS = [
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
     Platform.LOCK,
+    Platform.SENSOR,
+    Platform.SWITCH,
 ]
 
 STATE_MAP = {

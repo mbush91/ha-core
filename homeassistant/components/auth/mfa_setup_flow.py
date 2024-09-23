@@ -57,7 +57,11 @@ class MfaFlowManager(data_entry_flow.FlowManager):
     async def async_finish_flow(
         self, flow: data_entry_flow.FlowHandler, result: data_entry_flow.FlowResult
     ) -> data_entry_flow.FlowResult:
-        """Complete an mfs setup flow."""
+        """Complete an mfa setup flow.
+
+        This method is called when a flow step returns FlowResultType.ABORT or
+        FlowResultType.CREATE_ENTRY.
+        """
         _LOGGER.debug("flow_result: %s", result)
         return result
 
@@ -156,7 +160,7 @@ def _prepare_result_json(
     data = result.copy()
 
     if (schema := data["data_schema"]) is None:
-        data["data_schema"] = []
+        data["data_schema"] = []  # type: ignore[typeddict-item]  # json result type
     else:
         data["data_schema"] = voluptuous_serialize.convert(schema)
 
