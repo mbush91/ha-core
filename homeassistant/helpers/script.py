@@ -9,13 +9,14 @@ from contextvars import ContextVar
 from copy import copy
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from functools import cached_property, partial
+from functools import partial
 import itertools
 import logging
 from types import MappingProxyType
 from typing import Any, Literal, TypedDict, cast, overload
 
 import async_interrupt
+from propcache import cached_property
 import voluptuous as vol
 
 from homeassistant import exceptions
@@ -472,13 +473,13 @@ class _ScriptRun:
             script_execution_set("aborted")
         except _StopScript as err:
             script_execution_set("finished", err.response)
-            response = err.response
 
             # Let the _StopScript bubble up if this is a sub-script
             if not self._script.top_level:
-                # We already consumed the response, do not pass it on
-                err.response = None
                 raise
+
+            response = err.response
+
         except Exception:
             script_execution_set("error")
             raise
@@ -1132,7 +1133,11 @@ class _ScriptRun:
         self._step_log("wait for trigger", timeout)
 
         variables = {**self._variables}
-        self._variables["wait"] = {"remaining": timeout, "trigger": None}
+        self._variables["wait"] = {
+            "remaining": timeout,
+            "completed": False,
+            "trigger": None,
+        }
         trace_set_result(wait=self._variables["wait"])
 
         if timeout == 0:
@@ -1150,6 +1155,7 @@ class _ScriptRun:
             variables: dict[str, Any], context: Context | None = None
         ) -> None:
             self._async_set_remaining_time_var(timeout_handle)
+            self._variables["wait"]["completed"] = True
             self._variables["wait"]["trigger"] = variables["trigger"]
             _set_result_unless_done(done)
 
@@ -1583,6 +1589,9 @@ class Script:
                         target, referenced, script[CONF_SEQUENCE]
                     )
 
+            elif action == cv.SCRIPT_ACTION_SEQUENCE:
+                Script._find_referenced_target(target, referenced, step[CONF_SEQUENCE])
+
     @cached_property
     def referenced_devices(self) -> set[str]:
         """Return a set of referenced devices."""
@@ -1629,6 +1638,9 @@ class Script:
             elif action == cv.SCRIPT_ACTION_PARALLEL:
                 for script in step[CONF_PARALLEL]:
                     Script._find_referenced_devices(referenced, script[CONF_SEQUENCE])
+
+            elif action == cv.SCRIPT_ACTION_SEQUENCE:
+                Script._find_referenced_devices(referenced, step[CONF_SEQUENCE])
 
     @cached_property
     def referenced_entities(self) -> set[str]:
@@ -1677,6 +1689,9 @@ class Script:
             elif action == cv.SCRIPT_ACTION_PARALLEL:
                 for script in step[CONF_PARALLEL]:
                     Script._find_referenced_entities(referenced, script[CONF_SEQUENCE])
+
+            elif action == cv.SCRIPT_ACTION_SEQUENCE:
+                Script._find_referenced_entities(referenced, step[CONF_SEQUENCE])
 
     def run(
         self, variables: _VarsType | None = None, context: Context | None = None
